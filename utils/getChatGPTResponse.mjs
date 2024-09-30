@@ -7,6 +7,6 @@ export default async function getChatGPTResponse(question, openai, dir) {
         messages: [{ role: 'user', content: question }],
     });
     if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-    fs.writeFileSync(`${dir}/chatgptresponse.txt`, `${response.choices[0].message.content}\nCrie sua conta agora mesmo, link na bio.`, { encoding: 'utf8' });
-    return `${response.choices[0].message.content}\nCrie sua conta agora mesmo, link na bio.`;
+    fs.writeFileSync(`${dir}/chatgptresponse.txt`, `${response.choices[0].message.content}\nCrie sua conta agora mesmo, link na descrição.`, { encoding: 'utf8' });
+    return `${response.choices[0].message.content}\nCrie sua conta agora mesmo, link na descrição.`;
 }

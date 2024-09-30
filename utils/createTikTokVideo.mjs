@@ -2,6 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import getLastContentFolder from './getLastContentFolder.mjs';
+import cliProgress from 'cli-progress';
+
+// Cria uma nova barra de progresso
+const progressBar = new cliProgress.SingleBar({
+    format: 'Renderização [{bar}] {percentage}% | Tempo restante: {remainingTime}s',
+    barCompleteChar: '#',
+    barIncompleteChar: '-',
+    hideCursor: true
+}, cliProgress.Presets.shades_classic);
 
 // Função para obter a duração do áudio
 function getAudioDuration(audioPath) {
@@ -17,62 +26,107 @@ function getAudioDuration(audioPath) {
     });
 }
 
-async function createVideoWithImages(images, audioPath, contentDir) {
-    if (!fs.existsSync(path.resolve(audioPath))) throw new Error('Áudio não existe');
+/**
+ * Create a video slideshow using images and an audio track.
+ * @param {string[]} imagePaths - Array of image paths to be used in the slideshow.
+ * @param {string} audioPath - Path to the .mp3 audio file.
+ * @param {string} outputDir - Directory where the final video will be saved.
+ * @param {number} audioDuration - Duration of the audio file in seconds.
+ */
+const createVideoSlideshow = async (imagePaths, audioPath, outputDir, audioDuration, text = '') => {
+    const tempDir = path.join(outputDir, 'tempFrames');
 
-    // Obtém a duração do áudio
-    const audioDuration = await getAudioDuration(audioPath);
+    // Garante que o diretório temporário existe
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+    }
 
-    const timePerImage = (audioDuration / (images.length - 1) - 1)
+    // Duplicar imagens para combinar com a duração do áudio
+    const frameRate = 1 / 3; // Uma imagem a cada 3 segundos
+    const totalFrames = Math.ceil(audioDuration / 3);
+    const frameImages = Array.from({ length: totalFrames }, (_, i) => imagePaths[i % imagePaths.length]);
 
-    // Cria um comando FFmpeg
-    const command = ffmpeg();
+    // Cria as imagens temporárias com nomes sequenciais
+    const createFrames = async () => {
+        const framePromises = frameImages.map((image, index) => {
+            const framePath = path.join(tempDir, `frame${String(index).padStart(4, '0')}.png`);
+            return new Promise((resolve, reject) => {
+                fs.copyFile(image, framePath, (err) => (err ? reject(err) : resolve(framePath)));
+            });
+        });
+        return Promise.all(framePromises);
+    };
 
-    // Adiciona o áudio como entrada
-    command.input(audioPath).inputOptions([`-t ${audioDuration}`]);
+    const processVideo = (frames) => {
+        const outputVideoPath = path.join(outputDir, 'slideshow.mp4');
 
-    const text = "Crie sua conta agora mesmo, link na bio.";
-    const fontPath = path.resolve(`./${contentDir}/OpenSans-SemiBold.ttf`);
-    const fontPath1 = path.resolve(`/usr/share/fonts/TTF/OpenSans-SemiBold.ttf`);
+        return new Promise((resolve, reject) => {
+            ffmpeg()
+                .addInput(path.join(tempDir, 'frame%04d.png')) // Caminho para imagens temporárias
+                .inputOptions('-framerate', frameRate)
+                .input(audioPath)
+                .audioCodec('aac')
+                .videoCodec('libx264')
+                .outputOptions('-pix_fmt', 'yuv420p')
+                .size('1080x1920')
+                .videoFilters([
+                    // Filtro de texto centralizado com borda preta
+                    `drawtext=fontfile=/usr/share/fonts/TTF/DejaVuSans-Bold.ttf:text='${text}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=(h-text_h)/2`,
+                    // Ajusta o brilho e contraste para dar mais "vida" às imagens
+                    'eq=brightness=0.06:contrast=1.2',
+                    // Filtro de desfoque suave para criar transições suaves entre as imagens
+                    'boxblur=2:1',
+                    // Filtro de vinheta para adicionar bordas escuras
+                    'vignette',
+                    // Filtro de saturação para aumentar a intensidade das cores
+                    'hue=s=1.3',
+                    // Efeito de "zoom" que lentamente aproxima a imagem
+                    `zoompan=z='zoom+0.001':d=${Math.floor(audioDuration)}`,
+                    // Filtro de borda colorida para destacar o vídeo
+                    'drawbox=color=red@0.5:t=20',
+                    // Filtro de distorção cromática (aberration), separando cores para um efeito glitch
+                    'chromashift=4:2',
+                    // Efeito de sobreposição de texto em movimento para dinâmica extra
+                    `drawtext=fontfile=/usr/share/fonts/TTF/DejaVuSans-Bold.ttf:text='Follow Me!':fontcolor=yellow:fontsize=40:x='mod(98*t, w)':y=50`,
+                    // Filtro de fade out ao final para uma transição suave
+                    `fade=out:st=${Math.floor(audioDuration - 2)}:d=2`
+                ])
+                .on('error', (err) => reject(err))
+                .on('start', () => progressBar.start(100, 0))
+                .on('progress', progress => {
+                    const totalDuration = audioDuration; // Duração total do áudio em segundos
+                    const currentTime = progress.timemark.split(':').reduce((acc, time) => (60 * acc) + parseFloat(time), 0); // Converte o timestamp do ffmpeg em segundos
+                    const remainingTime = totalDuration - currentTime; // Calcula o tempo restante
+                    const currentProgress = Math.round((currentTime / totalDuration) * 100);
+                    const timeRemaining = Math.max(0, remainingTime.toFixed(2));
+                    if (isNaN(currentProgress) || isNaN(timeRemaining)) {
+                        return;
+                    }
+                    progressBar.update(currentProgress, {
+                        remainingTime: timeRemaining
+                    });
+                    // console.log(`Progresso: ${Math.round((currentTime / totalDuration) * 100)}%`);
+                    // console.log(`Tempo restante: ${Math.max(0, remainingTime.toFixed(2))} segundos`);
+                })
+                .on('end', () => {
+                    progressBar.stop();
+                    // Limpa os arquivos de frame temporários
+                    fs.rmSync(tempDir, { recursive: true, force: true });
+                    resolve(outputVideoPath);
+                })
+                .save(outputVideoPath);
+        });
+    };
 
-    if (!fs.existsSync(fontPath1)) throw new Error('Fonte não encontrada.');
+    try {
+        const frames = await createFrames();
+        await processVideo(frames);
+    } catch (error) {
+        throw new Error(`Erro ao criar o vídeo: ${error.message}`);
+    }
+};
 
-    // Adiciona cada imagem como entrada de vídeo
-    images.forEach((image) => {
-        const imagePath = path.resolve(image); // Resolve o caminho completo do arquivo
-        if (!fs.existsSync(imagePath)) {
-            throw new Error(`Imagem ${image} não encontrada.`);
-        }
-        command.input(imagePath).inputOptions(['-loop 1', `-t ${timePerImage}`]); // Define o loop e o tempo de exibição de cada imagem
-    });
-
-    // Concatena todas as entradas e define o formato de saída com drawtext
-    const filterComplex = images.map((_, index) => `[${index + 1}:v]`).join('');
-    const concatFilter = `${filterComplex}concat=n=${images.length}:v=1:a=0,scale=1080:1920,drawtext=fontfile='${fontPath1}':text='${text}':fontcolor=black:fontsize=50:x=(w-text_w)/2:y=(h-text_h)/2[vout]`;
-
-    command
-        .complexFilter([concatFilter])
-        .outputOptions([
-            '-map [vout]',       // Mapeia o vídeo final
-            '-map 0:a',          // Mapeia o áudio
-            '-vcodec libx264',   // Codec de vídeo
-            '-acodec aac',       // Codec de áudio
-            '-pix_fmt yuv420p',  // Compatibilidade de reprodução
-            '-t', `${audioDuration}`, // Define a duração com base no áudio
-            '-shortest'          // Garante que o vídeo pare quando o áudio terminar
-        ])
-        .output(`./${contentDir}/output.mp4`)
-        .on('end', () => {
-            console.log('Vídeo criado com sucesso!');
-        })
-        .on('error', (err) => {
-            console.error('Erro ao criar o vídeo:', err);
-        })
-        .run();
-}
-
-// Função para criar um vídeo com áudio e imagens em formato de slideshow
-export default async function createTikTokVideo(baseDir) {
+export default async function createTikTokVideo(baseDir, text = '') {
     const contentDir = getLastContentFolder(baseDir);
     console.log(contentDir);
 
@@ -103,5 +157,5 @@ export default async function createTikTokVideo(baseDir) {
 
     const imageDuration = 3;  // Exibe cada imagem por 3 segundos
 
-    createVideoWithImages(images, audioPath, contentDir);
+    createVideoSlideshow(images, audioPath, contentDir, audioDuration, text);
 }
